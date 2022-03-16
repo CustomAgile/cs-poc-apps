@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PlanningApp</title>
+
+    <script type="text/javascript" src="/apps/2.0/sdk.js"></script>
+
+    <script type="text/javascript">
+        Rally.onReady(function () {
+                Ext.define('Toolbox',{
+    singleton: true,
+
+    loadProjects: function(fetchList){
+        var deferred = Ext.create('Deft.Deferred');
+        Ext.create('Rally.data.wsapi.Store',{
+            model: 'Project',
+            fetch: fetchList,
+            limit: 'Infinity'
+        }).load({
+            callback: function(records, operation){
+                deferred.resolve(records);
+            }
+        });
+        return deferred;
+    },
+    getModelObject: function(name) {
+        var deffered=Ext.create('Deft.Deferred');
+        Rally.data.ModelFactory.getModel({
+            type: name,
+            success: function(model) {
+                deffered.resolve(model);
+            }
+        });
+        return deffered.promise;
+    },
+    buildProjectPinBuildingBlockData: function(records, fieldName){
+        var hashByObjectID = Toolbox.buildHashByField(records, 'ObjectID'),
+            pins = _.map(_.filter(records, function(r){return (/^TECHNOLOGY AREA/).test(r.get('Name')); }),
+                function(r){
+                    return r.get('ObjectID');
+                });
+
+        var projectsWithBuildingBlocks = Ext.Array.filter(records, function(record){
+            return record.get(fieldName) && record.get(fieldName).length > 0;
+        });
+
+        var data = Ext.Array.map(projectsWithBuildingBlocks, function(p){
+            var path = Toolbox.getProjectPath(p, hashByObjectID),
+                pathNames = Toolbox.getStringPath(path, hashByObjectID),
+                pin = _.intersect(pins, path);
+
+            return {
+                Name: p.get('Name'),
+                BuildingBlock: p.get(fieldName),
+                ObjectID: p.get('ObjectID'),
+                Ancestors: path,
+                AncestorNames: pathNames,
+                Pin: hashByObjectID[pin]
+            };
+        });
+        return data;
+    },
+    buildHashByField: function(records, field){
+        var hash = {};
+        Ext.Array.each(records, function(record){
+            hash[record.get(field)] = record;
+        });
+        return hash;
+    },
+    buildCustomProjectData: function(records,customField){
+        var hashByObjectID = Toolbox.buildHashByField(records, 'ObjectID');
+
+        var projectsWithBuildingBlocks = Ext.Array.filter(records, function(record){
+            return record.get(customField) && record.get(customField).length > 0;
+        });
+
+        var data = Ext.Array.map(projectsWithBuildingBlocks, function(p){
+            var path = Toolbox.getProjectPath(p, hashByObjectID),
+                stringPath = Toolbox.getStringPath(path, hashByObjectID);
+            return {
+                Name: p.get('Name'),
+                BuildingBlock: p.get(customField),
+                ObjectID: p.get('ObjectID'),
+                Path: stringPath,
+                Ancestors: path
+            };
+        });
+        return data;
+    },
+    getStringPath: function(path, hashByObjectID){
+        var stringPath = _.map(path, function(p){ return hashByObjectID[p].get('Name') || "--"; });
+        return stringPath;
+    },
+    getProjectPath: function(projectRecord, projectHashByObjectID){
+        var parent = projectRecord.get('Parent') && projectRecord.get('Parent').ObjectID,
+            path = [projectRecord.get('ObjectID')];
+
+        while (parent){
+            var parentRecord = projectHashByObjectID[parent];
+            if (parentRecord){
+                path.unshift(projectHashByObjectID[parent].get('ObjectID'));
+                parent = parentRecord.get('Parent') && parentRecord.get('Parent').ObjectID;
+            } else {
+                parent = null;
+            }
+        }
+        return path;
+    }
+});
+                Ext.define('SummaryTemplate',{
+    extend: 'Ext.XTemplate',
+
+    width: '100%',
+    /**
+     * @cfg {String}
+     * define a height if necessary to fit where it's being used
+     */
+    height: '20px',
+
+    constructor: function(config) {
+        var templateConfig = [
+            '<tpl><table class="summary">',
+            '<thead>',
+                '<th class="summary">Platform/PIN</th>',
+                '<th class="summary">Quarter</th>',
+                '<th class="summary">Home Demand</th>',
+                '<th class="summary">Team Sprint Capacity</th>',
+                '<th class="summary">Utilization</th>',
+                '<th class="summary">Visitor Demand</th>',
+            '</thead>',
+            '<tpl for=".">',
+            '<tr>',
+                '<td class="summary">{Pin}</td>',
+                '<td class="summary">{Quarter}</td>',
+                '<td class="summary">{[this.getHomeDemand(values)]}</td>',
+                '<td class="summary">{TeamSprintCapacity}</td>',
+                '<td class="summary">',
+            '<div class="progress-bar-container field-{[this.getPercentUtilization]}" style="{[this.getDimensionStyle()]}">',
+            '<div class="rly-progress-bar" style="background-color: {[this.calculateColorFn(values)]}; width: {[this.calculateWidth(values)]}; "></div>',
+            '<tpl if="this.showDangerNotificationFn(values)">',
+            '<div class="progress-bar-danger-notification"></div>',
+            '</tpl>',
+            '<div class="progress-bar-label">',
+            '{[this.generateLabelTextFn(values)]}',
+            '</div>',
+            '</div>',
+                '</td>',
+                '<td class="summary">{[this.getVisitorDemand(values)]}</td>',
+            '</tr>',
+            '</tpl>',
+            '</table></tpl>',
+            {
+                calculateColorFn: function(recordData){
+                    var percentDone = this.getPercentUtilization(recordData);
+                    if (percentDone < 80) {
+                        return Rally.util.Colors.lime;
+                    } else if (recordData.percentDone <= 1) {
+                        return Rally.util.Colors.yellow;
+                    } else {
+                        return Rally.util.Colors.red_med;
+                    }
+                },
+                getVisitorDemand: function(recordData){
+                    return (recordData.totalDemand - recordData.homeDemand) || '--';
+                },
+                getHomeDemand: function(recordData){
+                    return (recordData.homeDemand || '--');
+                },
+                getPercentUtilization: function(recordData){
+                    return recordData.totalDemand > 0 ? Math.round(recordData.homeDemand/recordData.TeamSprintCapacity * 100) : 0;
+                },
+                getDimensionStyle: function(){
+                    return 'width: ' + this.width + '; height: ' + this.height + '; line-height: ' + this.height + ';display: inline-block';
+                },
+                calculateWidth: function (recordData) {
+                    var percentDone = this.getPercentUtilization(recordData);
+                    return percentDone > 100 ? '100%' : percentDone + '%';
+                },
+                generateLabelTextFn: function (recordData) {
+                    return this.getPercentUtilization(recordData) + '%';
+                }
+            }
+        ];
+
+        return this.callParent(templateConfig);
+
+    }
+});
+                Ext.define('ProjectInformationStore',{
+    buildingBlockField: 'c_BuildingBlock',
+    constructor: function(config){
+        this.projectHashByObjectID = this.buildHashByField(config.projectRecords, 'ObjectID');
+    },
+    /**
+     * getPinRecordForProject
+     * @param projectObjectID
+     * @returns {the project record that represents the ancestor PIN for the passed project Object ID}
+     * A project is determined as a PIN by it's naming as a "Technology Area: *".  If there are multiple
+     * project name matches in the passed project's hierarchy, then the highest level match is return.
+     */
+    getPinRecordForProject: function(projectObjectID, hash){
+        var projectHashByObjectID = hash || this.projectHashByObjectID,
+            rec = projectHashByObjectID[projectObjectID];
+
+        if (!rec){
+            console.log('null', projectObjectID, this.projectHashByObjectID);
+            return null;
+        }
+
+        if (rec.get('__pin')){
+            return projectHashByObjectID[rec.get('__pin')];
+        }
+
+        var path = rec.get('__path') || this.getProjectPath(rec, projectHashByObjectID),
+            pinRecord = null,
+            pinRegExp = new RegExp("^TECHNOLOGY AREA:","i");
+
+        Ext.Array.each(path, function(p){
+            if (pinRegExp.test(projectHashByObjectID[p].get('Name'))){
+                pinRecord = projectHashByObjectID[p];
+                return false;
+            }
+        });
+        if (pinRecord){
+            rec.set('__pin', pinRecord.get('ObjectID'));
+        }
+        return pinRecord;
+    },
+    /**
+     * getTeamSprintCapacity:  calculates the team sprint capacity for the passed project.
+     * For the POC we are just pulling this from a custom field.
+     * Other approaches discussed were to count the leaf projects inside of a pin and multiply those
+     * by a number
+     */
+    getTeamSprintCapacity: function(projectOid, quarters){
+        return this.getPinRecordForProject(projectOid).get('c_Capacity');
+    },
+    buildHashByField: function(records, field){
+        var hash = {};
+        console.log('buildHashByField', records);
+        Ext.Array.each(records, function(record){
+            hash[record.get(field)] = record;
+        }, this);
+        this.projectHashByObjectID = hash;
+
+        Ext.Object.each(hash, function(key, record){
+            record.set('__path', this.getProjectPath(record, hash));
+        }, this);
+
+        return hash;
+    },
+    /**
+     * getProjectPath
+     * @param projectRecord
+     * @param projectHashByObjectID
+     * @returns {*[]} returns an array of project ObjectIDs that represent the hierarchy path for the passed projectRecord
+     */
+    getProjectPath: function(projectRecord, projectHashByObjectID){
+        var parent = projectRecord.get('Parent') && projectRecord.get('Parent').ObjectID,
+            path = [projectRecord.get('ObjectID')];
+
+        while (parent){
+            var parentRecord = projectHashByObjectID[parent];
+            if (parentRecord){
+                path.unshift(projectHashByObjectID[parent].get('ObjectID'));
+                parent = parentRecord.get('Parent') && parentRecord.get('Parent').ObjectID;
+            } else {
+                parent = null;
+            }
+        }
+        return path;
+    },
+    getBuildingBlockOptions: function(projectObjectID, useHomeTeam, hash){
+
+        var homePin = this.getPinRecordForProject(projectObjectID).get('ObjectID'),
+            buildingBlockField = this.buildingBlockField;
+
+        if (!hash){
+            hash = this.projectHashByObjectID;
+        }
+
+        var optionsHash = {};
+        Ext.Object.each(hash, function(key, obj){
+            var pin = this.getPinRecordForProject(obj.get('ObjectID'), hash) &&
+                this.getPinRecordForProject(obj.get('ObjectID'), hash).get('ObjectID'),
+                bb = obj.get(buildingBlockField);
+            console.log('pin',pin,bb);
+            if (bb && pin && ((pin === homePin) === useHomeTeam)){
+                if (!optionsHash[pin]){
+                    optionsHash[pin] = [];
+                }
+                if (!Ext.Array.contains(optionsHash[pin], bb)){
+                    optionsHash[pin].push(bb);
+                }
+            }
+        }, this);
+
+        var data = [];
+        Ext.Object.each(optionsHash, function(key, opt){
+            Ext.Array.each(opt, function(bb){
+                var name = hash[key].get('Name');
+                console.log('jey',key,hash[key],name);
+                data.push({
+                    pin: key,
+                    pinName: name,
+                    buildingBlock: bb
+                });
+            });
+        });
+        console.log('data',data, optionsHash);
+        return data;
+    }
+});
+
+                Ext.define('BuildingBlock', {
+    extend: 'Ext.data.Model',
+    fields: ['ordinal', 'team','type','name','amount'],
+    belongsTo: 'PortfolioModelWithBuildingBlocks'
+});
+
+Ext.define('ExtendedModelBuilder',{
+    singleton: true,
+
+    build: function(modelType, newModelName, context) {
+        var deferred = Ext.create('Deft.Deferred');
+
+        Rally.data.ModelFactory.getModel({
+            type: modelType,
+            success: function(model) {
+
+                var default_fields = [{
+                    name: 'children',
+                    convert: function(value, record){
+                        return record._getBuildingBlockObjects();
+                    }
+                },{
+                    name: 'text',
+                    convert: function(value, record){
+                        return record.get('FormattedID');
+                    }
+                },{
+                    name: '__demand',
+                    defaultValue: '--'
+                }];
+                var new_model = Ext.define(newModelName, {
+                    extend: model,
+                    fields: default_fields,
+                    buildingBlockField: 'c_RequestedPins',
+                    /**
+                     * appends building block data to the record's building blocks
+                     * @param selectedTeams
+                     */
+                    appendBuildingBlock: function(bbs){
+                        var buildingBlocks = this._getBuildingBlockObjects();
+
+                        //This assumes that building blocks will be unique.  If they are not, then we need to add them
+                        Ext.Array.each(bbs, function(bb){
+                            buildingBlocks.push(bb);
+                        });
+                        this._setBuildingBlockObjects(buildingBlocks);
+                    },
+                    getFlattenedBuildingBlockObjects: function(quarters){
+                        var buildingBlocks = this._getBuildingBlockObjects(),
+                            hash = {};
+
+                        Ext.Array.each(buildingBlocks, function(bb){
+                            var key = bb.pin + "|" + bb.buildingBlock;
+                            if (!hash[key]){
+                                hash[key] = {
+                                        pin: bb.pin,
+                                        pinName: bb.pinName,
+                                        buildingBlock: bb.buildingBlock
+                                    };
+                                Ext.Array.each(quarters, function(q){
+                                    hash[key][q] = 0;
+                                });
+                            }
+                            if (Ext.Array.contains(quarters, bb.quarter)){
+                                hash[key][bb.quarter] = bb.demand || 0;
+                            }
+                        });
+                        console.log('getFlattenedBuildingBlockObjects',hash, _.values(hash));
+                        return _.values(hash);
+                    },
+                    /**
+                     * private functions to encode and decode the JSON that is stored in the text field or external data source
+                     *
+                     * @returns {*}
+                     * @private
+                     *
+                     * Expected JSON format:
+                     *  [{
+                     *      pin: <project ObjectID of assigned pin>,
+                     *      pinName: <project Name of assigned pin>,
+                     *      buildingBlock: <building block name>,
+                     *      quarter: <quarter name>,
+                     *      demand: <demand>
+                     *   },{
+                     *      ...
+                     *   }]
+                     *
+                     */
+                    _getBuildingBlockObjects: function(){
+                        var objects =  Ext.JSON.decode(this.get(this.buildingBlockField) || "[]");
+
+                        //post-load data manipulation  here - need to transform the normalized JSON into
+                        //rows that can be displayed in a grid.
+                        //Also need to add same fields as parent
+                        Ext.Array.each(objects, function(o){
+                            o.children=null;
+                            o.text = o.pinName + ' - ' + o.buildingBlock;
+                        });
+
+                        return objects;
+                    },
+                    _setBuildingBlockObjects: function(buildingBlocks){
+
+                        //pre-save data manipulation here - need to transform the flattened rows into
+                        //normalized object to save as JSON
+
+                        this.set(this.buildingBlockField, Ext.JSON.encode(buildingBlocks || []));
+                        this.save();
+                    },
+                    /**
+                     * updateBuildingBlocks updates the building blocks to either the internal text field
+                     * or eventually to an external data source
+                     * @param bbs
+                     *
+                     * In this method we need to:
+                     *   -- not overwrite building blocks that aren't in the quarters we are interested in
+                     *   -- remove building blocks that we may have deleted from the UI
+                     *   -- add building blocks that we may have added to the UI
+                     */
+                    updateBuildingBlocks: function(bbs){
+                        //For this function, we need to make sure we:
+                        //  --> don't overwrite any building blocks in other quarters and
+                        this._setBuildingBlockObjects(bbs);
+                    },
+                    getDemand: function(quarter, pin){
+                        var buildingBlocks = this._getBuildingBlockObjects(),
+                            demand = 0;
+
+                        Ext.Array.each(buildingBlocks, function(bb){
+                            if (bb.quarter === quarter){
+                                console.log('pin',pin,bb);
+                                if (pin){
+                                    if (Number(bb.pin) === pin) {
+                                        demand += bb.demand;
+                                    }
+                                } else {
+                                    demand += bb.demand;
+                                }
+
+                            }
+                        });
+                        return demand;
+                    }
+
+                });
+                deferred.resolve(new_model);
+            },
+            save: function(options){
+                //add any pre save manipulations here
+                return callParent(options);
+            }
+        });
+        return deferred;
+    }
+});
+                var data = [];
+Ext.define('CustomApp', {
+    extend: 'Rally.app.App',
+    componentCls: 'app',
+
+    parentTypePath: 'portfolioitem/roadmap',
+    planningQuarterField: 'c_PlanningQuarter',
+    parentFetch: ['FormattedID','Name','ObjectID','Project','c_RequestedPins'],
+    projectFetchList: ['ObjectID','Name','Parent'],
+    buildingBlockField: 'c_BuildingBlock',
+    teamCapacityField: 'c_Capacity',
+
+    items: [{
+        xtype:'container',
+        itemId: 'filterBox',
+        layout: 'hbox',
+        padding: 10
+    },{
+        xtype: 'container',
+        itemId: 'summaryBox',
+        padding: 10
+    },{
+        xtype:'container',
+        itemId: 'gridBox',
+        padding: 10
+    }],
+
+    launch: function() {
+
+        var projectFetchList = this.projectFetchList.concat([this.buildingBlockField, this.teamCapacityField]);
+
+        Deft.Promise.all([
+            Toolbox.loadProjects(projectFetchList)
+        ]).then({
+            scope:this,
+            success: function(results) {
+                 this.projectInfoStore =Ext.create('ProjectInformationStore',{
+                    projectRecords: results[0]
+                });
+                this._addComponents();
+            },
+            failure: function(message) {
+                Rally.ui.notify.Notifier.showError({message: 'Error retrieving projects: ' + message});
+            }
+        });
+    },
+
+    _addComponents: function() {
+
+        this.down('#filterBox').removeAll();
+
+        //validate that we are running within the scope of a PIN.
+        if (!this._getPlatformPin()){
+            console.log('this', this._getPlatformPin());
+            this.down('#filterBox').add({
+                xtype: 'container',
+                html: "Please choose a Project Scope that is associated with a valid PIN."
+            });
+            return;
+        }
+
+        this._addFilterComponent();
+        this._addSummaryComponent();
+    },
+    _addSummaryComponent: function() {
+        this.down('#summaryBox').tpl = Ext.create('SummaryTemplate');
+        this._updateSummaryContainer();
+    },
+    _updateSummaryContainer: function(validationMessage){
+
+        var summary = this.down('#summaryBox'),
+            projectID = this.getContext().getProject().ObjectID,
+            quarters = this._getQuarters(),
+            pin = this._getPlatformPin(),
+            records = this.down('#dataGrid') && this.down('#dataGrid').getStore().getRange() || [];
+
+        var summaryInfo = [];
+        Ext.Array.each(quarters, function(q){
+            var homeDemand = this._getDemand(records, q, pin.get("ObjectID")),
+                totalDemand = this._getDemand(records, q);
+
+            summaryInfo.push({
+                Pin: this._getPlatformPinName(),
+                Quarter: q,
+                TeamSprintCapacity: this.projectInfoStore.getTeamSprintCapacity(projectID),
+                homeDemand: homeDemand,
+                totalDemand: totalDemand
+            });
+        }, this);
+
+
+        if (quarters.length === 0){
+            summaryInfo.push({
+                Pin: this._getPlatformPinName(),
+                Quarter: '<div style="color:red;">Please select at least 1 quarter to plan</div>',
+                TeamSprintCapacity: '--',
+                homeDemand: '--',
+                totalDemand: '--'
+            });
+        }
+
+        summary.update(summaryInfo);
+    },
+    _getDemand: function(records, quarter, homePin){
+        var demand = 0;
+        Ext.Array.each(records, function(r){
+           demand += r.getDemand(quarter,homePin); //If homepin is empty, then it will calculate the total demand
+        });
+        return demand;
+    },
+    _getPlatformPin: function(){
+        return this.projectInfoStore.getPinRecordForProject(this.getContext().getProject().ObjectID);
+    },
+    _getPlatformPinName: function(){
+        var pin = this._getPlatformPin();
+        return pin && pin.get('Name') || "No PIN";
+    },
+    _getPlatformPinObjectID: function(){
+        var pin = this._getPlatformPin();
+        return pin && pin.get('ObjectID') || 0;
+    },
+    _addFilterComponent: function() {
+
+       this.down('#filterBox').add({
+                xtype: 'rallyfieldvaluecombobox',
+                itemId: 'quarterComboBox',
+                fieldLabel: 'Planning Quarter:',
+                labelAlign: 'right',
+                allowNoEntry: false,
+                model: this.parentTypePath,
+                field: this.planningQuarterField,
+                multiSelect: true,
+                allowBlank: false
+        });
+
+        //this.down('#filterBox').add({
+        //        xtype: 'rallyfieldvaluecombobox',
+        //        itemId: 'stateComboBox',
+        //        fieldLabel: 'State:',
+        //        labelAlign: 'right',
+        //        multiSelect: true,
+        //        model: this.parentTypePath,
+        //        field: 'State',
+        //        allowNoEntry: false
+        //});
+
+        this.down('#filterBox').add({
+            xtype: 'rallycheckboxfield',
+            fieldLabel: 'View Visitor Requests',
+            value: false,
+            itemId: 'showVisitingRequests',
+            labelAlign: 'right',
+            labelWidth: 150,
+            listeners: {
+                change: this._displayGrid,
+                scope: this
+            }
+        });
+
+       // this.down('#stateComboBox').on('select', this._onSelect, this);
+        this.down('#quarterComboBox').on('select', this._displayGrid, this);
+
+        this._displayGrid();
+    },
+    _getFilters: function(){
+        //var state = this.down('#stateComboBox').getValue(),
+        var quarters = this._getQuarters(),
+            filters = null,
+            quarterFilters = null,
+            showVisitorRequests = this.down('#showVisitingRequests').getValue();
+
+        if (quarters && quarters.length > 0){
+            quarterFilters = [];
+            Ext.Array.each(quarters, function(q){
+                if (q && q.length > 0){
+                    quarterFilters.push(Ext.create('Rally.data.wsapi.Filter', {
+                        property: this.planningQuarterField,
+                        value: q || ""
+                    }));
+                }
+
+            }, this);
+            quarterFilters = Rally.data.wsapi.Filter.or(quarterFilters);
+        }
+
+        //now get the pin filters
+        if (showVisitorRequests){
+            var pin = this._getPlatformPinObjectID();
+
+            filters = Ext.create('Rally.data.wsapi.Filter',{
+                property: 'c_RequestedPins',
+                operator: 'contains',
+                value: '"' + pin + '"'
+            });
+        }
+
+         if (filters && quarterFilters){
+            filters =  quarterFilters.and(filters);
+            console.log('_getFilters', filters.toString());
+            return filters;
+        }
+        return filters || quarterFilters || [];
+    },
+    _getQuarters: function(){
+        return Ext.Array.filter(this.down('#quarterComboBox').getValue() || [], function(q){
+            return q && q.length > 0;
+        });
+    },
+    _validateSelections: function(){
+         if (this._getQuarters().length > 0){
+            return true;
+        }
+
+        this._updateSummaryContainer("Please select at least 1 quarter to plan.");
+        return false;
+    },
+
+    _displayGrid: function(){
+
+        this.down('#gridBox').removeAll();
+
+        if (!this._validateSelections()){
+            return;
+        }
+
+        ExtendedModelBuilder.build(this.parentTypePath, 'PortfolioItemWithBuildingBlocks').then({
+            success: this._buildGrid,
+            failure: this._showError,
+            scope: this
+        });
+    },
+    _showError: function(message){
+        Rally.ui.notify.Notifier.showError({message: message});
+    },
+    _loadExternalData: function(store, records){
+
+        var objectIDs = _.map(records, function(r){
+            return r.get('ObjectID');
+        }),
+            quarters = this._getQuarters();
+        console.log('_loadExternalData',records);
+
+        this._fetchExternalData(objectIDs, quarters).then({
+            success: function(data){
+                Ext.Array.each(records, function(r){
+                    ///r.updateBuildingBlocks(data);
+                });
+                this._updateSummaryContainer();
+            },
+            failure: this._showError,
+            scope: this
+        });
+
+    },
+    _fetchExternalData: function(objectIDs, quarters){
+        var deferred = Ext.create('Deft.Deferred');
+
+        //We get Phuocs stuff
+        deferred.resolve(data);
+
+        return deferred;
+    },
+    _getProjectContext: function(){
+        var showVisitors = this.down('#showVisitingRequests').getValue();
+
+        if (showVisitors){
+            return {project: null};
+        }
+        return {
+            project: this.getContext().getProject()._ref,
+            projectScopeDown: true
+        };
+    },
+    _buildGrid: function(model){
+        var projectContext = this._getProjectContext();
+
+        var grid = this.down('#gridBox').add({
+            xtype: 'rallygrid',
+            itemId: 'dataGrid',
+            stateful: false,
+            storeConfig: {
+                model: model,
+                fetch: this.parentFetch,
+                autoLoad: true,
+                filters: this._getFilters(),
+                listeners: {
+                    load: this._loadExternalData,
+                    datachanged: this._updateSummaryContainer,
+                    scope: this
+                },
+                context: projectContext
+            },
+            margin: 25,
+            columnCfgs: this._getColumnCfgs(),
+            showRowActionsColumn: false,
+            plugins: [{
+                ptype: 'rowexpander',
+                rowBodyTpl: '<div id="planning-{FormattedID}"> </div>'
+            }]
+        });
+        grid.getView().on('expandbody', this._expandRowBody, this);
+    },
+    _expandRowBody: function(rowNode, record, expandRow, options){
+        var ct = Ext.get(expandRow.querySelector('#planning-' + record.get('FormattedID'))),
+            quarters = this._getQuarters();
+
+        var grid = this.down('#planning-row-' + record.get('FormattedID'));
+        if (this.grid){
+            this.grid.destroy();
+        }
+
+        var columnCfgs = [{
+            dataIndex: 'pin',
+            text: 'Building Block',
+            flex: 1,
+            renderer: function(v,m,r){
+                return r.get('pinName') + ' - ' + r.get('buildingBlock');
+            }
+        }];
+
+        Ext.Array.each(quarters, function(q){
+            if (q && q.length > 0){
+                columnCfgs.push({
+                    dataIndex: q,
+                    text: q,
+                    flex: 1,
+                    editor: {
+                        xtype: 'rallynumberfield'
+                    }
+                });
+            }
+        });
+
+
+        this.grid = Ext.create('Rally.ui.grid.Grid',{
+            itemId: 'planning-row-' + record.get('FormattedID'),
+            store: this._transformDataToTempStoreData(record, quarters),
+            pageSize: data.length,
+            showPagingToolbar: false,
+            columnCfgs: columnCfgs,
+            renderTo: ct
+        });
+        ct.setHeight(200);
+    },
+    _transformDataToTempStoreData: function(record, quarters){
+        var hash = {};
+        var fields = ['pin','pinName','buildingBlock'].concat(quarters),
+            jsonData = Ext.JSON.decode(record.get('c_RequestedPins') || "[]");
+
+        Ext.Array.each(jsonData || [], function(bb){
+            console.log('inside bb', bb);
+            var bbDisplayName = bb.pinName + ' - ' + bb.buildingBlock;
+            if (bb.quarter && bb.quarter.length > 0){
+                if (!hash[bbDisplayName]){
+                    hash[bbDisplayName] = {
+                        pin: bb.pin,
+                        pinName: bb.pinName,
+                        buildingBlock: bb.buildingBlock
+                    };
+                }
+                hash[bbDisplayName][bb.quarter] = (bb.demand || 0) + (hash[bbDisplayName][bb.quarter] || 0);
+            }
+        });
+
+        var data = _.values(hash);
+
+        return Ext.create('Rally.data.custom.Store',{
+            data: data,
+            fields: fields,
+            listeners: {
+                scope: this,
+                update: function(store){
+                    record.updateBuildingBlocks(this._transformDataFromTempStore(store, quarters));
+                    this._updateSummaryContainer();
+                }
+            }
+        });
+    },
+    _transformDataFromTempStore: function(store, quarters){
+        var data = [],
+            bbs =  _.map(store.getRange(), function(bb){ return bb.getData(); });
+
+        Ext.Array.each(bbs, function(bb){
+            Ext.Array.each(quarters, function(q){
+                console.log('bb',bb,q);
+                if (bb[q] >= 0){
+                    data.push({
+                        pin: bb.pin,
+                        pinName: bb.pinName,
+                        buildingBlock: bb.buildingBlock,
+                        quarter: q,
+                        demand: bb[q]
+                    });
+                }
+            });
+        });
+        return data;
+    },
+    _getColumnCfgs: function(){
+        var me = this,
+            quarters = this._getQuarters();
+
+        var columns = [{
+            xtype: 'rallyrowactioncolumn',
+            rowActionsFn: function (record) {
+                return [
+                    {
+                        xtype: 'rallyrecordmenuitem',
+                        record: record,
+                        text: "Add Home Building Block...",
+                        handler: function () {
+                            me._showBuildingBlockPicker(true, record);
+                        },
+                        scope: this
+                    },
+                    {
+                        xtype: 'rallyrecordmenuitem',
+                        record: record,
+                        text: "Add Visitor Building Block...",
+                        handler: function () {
+                            me._showBuildingBlockPicker(false, record);
+                        },
+                        scope: this
+                    }
+                ];
+            }
+        },{
+            dataIndex: 'FormattedID'
+        },{
+            dataIndex: 'Name',
+            flex: 2
+        }];
+
+        quarters = quarters || [];
+        Ext.Array.each(quarters, function(q){
+            if (q && q.length > 0){
+                columns.push({
+                    dataIndex: '__demand',
+                    text: q + ' Demand',
+                    flex: 1,
+                    renderer: function(v,m,r) {
+                        return r.getDemand(q);
+                    }
+                });
+            }
+        });
+
+        columns = columns.concat([{
+           dataIndex: 'Project',
+            flex: 1
+        },{
+           dataIndex: 'PlannedStartDate',
+            flex: 1
+        },{
+           dataIndex: 'PlannedEndDate',
+            flex: 1
+        }]);
+        return columns;
+    },
+    _showBuildingBlockPicker: function(isHome, record){
+
+        var projectObjectID = this.getContext().getProject().ObjectID,
+            teamFields = ['buildingBlock','pinName','pin'],
+            teamData = this.projectInfoStore.getBuildingBlockOptions(projectObjectID, isHome);
+
+        var dlg = Ext.create('Rally.ui.dialog.CustomChooserDialog',{
+            teamFields: teamFields,
+            teamData: teamData,
+            listeners: {
+                scope: this,
+                itemchosen: function(dlg, selectedTeam){
+                    var bbs = this.buildBuildingBlockData(selectedTeam);
+                    record.appendBuildingBlock(bbs);
+                }
+            }
+        });
+        dlg.show();
+    },
+    buildBuildingBlockData: function(teams){
+        if (!Ext.isArray(teams)){
+            teams = [teams];
+        }
+        var data = [],
+            quarters = this._getQuarters();
+
+        Ext.Array.each(quarters, function(q){
+            Ext.Array.each(teams, function(t){
+                var tData = t.getData();
+                data.push({
+                    pin: tData.pin,
+                    pinName: tData.pinName,
+                    buildingBlock: tData.buildingBlock,
+                    quarter: q,
+                    demand: 0
+                });
+            });
+        });
+        return data;
+    }
+});
+
+                //USAGE:
+//
+// teamData is an array of objects with relevant data attributes (one must be a unique ObjectID)
+// teamFields is an array of string fields to display in the grid
+//
+//
+//var dlg = Ext.create('Rally.ui.dialog.CustomChooserDialog',{
+//    teamFields: fields,
+//    teamData: data,
+//    listeners: {
+//        itemchosen: function(dlg, selectedTeam){
+//            console.log('team chosen', selectedTeam);
+//        }
+//    }
+//});
+//dlg.show();
+
+Ext.define('Rally.ui.dialog.CustomChooserDialog', {
+    extend: 'Rally.ui.dialog.Dialog',
+    alias: 'widget.customchooserdialog',
+
+    height: 400,
+    width: 600,
+    layout: 'fit',
+    closable: true,
+    draggable: true,
+
+    config: {
+        /**
+         * @cfg {String}
+         * Title to give to the dialog
+         */
+        title: 'Choose an Item',
+
+        /*
+         * teamData is an array of objects with relevant data.  At least one of hte properties must be a unique object id
+         *
+         */
+        teamData: [],
+        /*
+         * teamFields is the fields to display
+         */
+        teamFields: [],
+
+        /**
+         * @cfg {Boolean}
+         * Allow multiple selection or not
+         */
+        multiple: true,
+
+        /**
+         * @cfg {Ext.grid.Column}
+         * List of columns that will be used in the chooser
+         */
+        columns: [
+            {
+                text: 'Building Block',
+                dataIndex: 'buildingBlock',
+                flex: 1,
+                renderer: function(v,m,r){
+                    return r.get('pinName') + ' - ' + r.get('buildingBlock');
+                }
+            }
+        ],
+
+        /**
+         * @cfg {String}
+         * Text to be displayed on the button when selection is complete
+         */
+        selectionButtonText: 'Done',
+
+        /**
+         * @cfg {Object}
+         * The grid configuration to be used when creative the grid of items in the dialog
+         */
+        gridConfig: {},
+
+        /**
+         * @deprecated
+         * @cfg {String}
+         * The ref of a record to select when the chooser loads
+         * Use selectedRecords instead
+         */
+        selectedRef: undefined,
+
+        /**
+         * @cfg {String}|{String[]}
+         * The ref(s) of items which should be selected when the chooser loads
+         */
+        selectedRecords: undefined,
+
+        /**
+         * @cfg {Array}
+         * The records to select when the chooser loads
+         */
+        initialSelectedRecords: undefined,
+
+        /**
+         * @private
+         * @cfg userAction {String} (Optional)
+         * The client metrics action to record when the user makes a selection and clicks done
+         */
+
+        /**
+         * @cfg showRadioButtons {Boolean}
+         */
+        showRadioButtons: true
+    },
+
+    constructor: function(config) {
+        this.mergeConfig(config);
+
+        this.callParent([this.config]);
+    },
+
+    selectionCache: [],
+
+    initComponent: function() {
+        this.callParent(arguments);
+
+        this.addEvents(
+            /**
+             * @event artifactchosen
+             * Fires when user clicks done after choosing an artifact
+             * @param {Rally.ui.dialog.ArtifactChooserDialog} source the dialog
+             * @param {Rally.data.wsapi.Model}| {Rally.data.wsapi.Model[]} selection selected record or an array of selected records if multiple is true
+             */
+            'itemchosen'
+        );
+
+        this.addCls(['chooserDialog', 'chooser-dialog']);
+    },
+
+    destroy: function() {
+        this._destroyTooltip();
+        this.callParent(arguments);
+    },
+
+    beforeRender: function() {
+        this.callParent(arguments);
+
+        this.addDocked({
+            xtype: 'toolbar',
+            dock: 'bottom',
+            padding: '0 0 10 0',
+            layout: {
+                type: 'hbox',
+                pack: 'center'
+            },
+            ui: 'footer',
+            items: [
+                {
+                    xtype: 'rallybutton',
+                    itemId: 'doneButton',
+                    text: this.selectionButtonText,
+                    cls: 'primary rly-small',
+                    scope: this,
+                    disabled: true,
+                    userAction: 'clicked done in dialog',
+                    handler: function() {
+                        this.fireEvent('itemchosen', this, this.getSelectedRecords());
+                        this.close();
+                    }
+                },
+                {
+                    xtype: 'rallybutton',
+                    text: 'Cancel',
+                    cls: 'secondary rly-small',
+                    handler: this.close,
+                    scope: this,
+                    ui: 'link'
+                }
+            ]
+        });
+
+        if (this.introText) {
+            this.addDocked({
+                xtype: 'component',
+                componentCls: 'intro-panel',
+                html: this.introText
+            });
+        }
+
+        this.addDocked({
+            xtype: 'toolbar',
+            itemId: 'searchBar',
+            dock: 'top',
+            border: false,
+            padding: '0 0 10px 0',
+            items: this.getSearchBarItems()
+        });
+
+        this.buildGrid();
+
+        this.selectionCache = this.getInitialSelectedRecords() || [];
+    },
+
+    /**
+     * Get the records currently selected in the dialog
+     * {Rally.data.Model}|{Rally.data.Model[]}
+     */
+    getSelectedRecords: function() {
+        return this.multiple ? this.selectionCache : this.selectionCache[0];
+    },
+
+    getSearchBarItems: function() {
+        return [
+            {
+                xtype: 'triggerfield',
+                cls: 'rui-triggerfield chooser-search-terms',
+                emptyText: 'Search Keyword or ID',
+                enableKeyEvents: true,
+                flex: 1,
+                itemId: 'searchTerms',
+                listeners: {
+                    keyup: function (textField, event) {
+                        if (event.getKey() === Ext.EventObject.ENTER) {
+                            this._search();
+                        }
+                    },
+                    afterrender: function (field) {
+                        field.focus();
+                    },
+                    scope: this
+                },
+                triggerBaseCls: 'icon-search chooser-search-icon'
+            }
+        ];
+    },
+
+    getStoreFilters: function() {
+        return [];
+    },
+
+    _getProjectDataStore: function(){
+        console.log('this',this.teamData, this.teamFields);
+        var data = this.teamData;
+        return Ext.create('Rally.data.custom.Store',{
+            data: data,
+            fields: this.teamFields,
+            pageSize: data.length,
+            remoteFilter: false //we need this for the filtering
+        });
+    },
+
+    buildGrid: function() {
+        if (this.grid) {
+            this.grid.destroy();
+        }
+
+        var projectDataStore = this._getProjectDataStore();
+
+        var selectionConfig = {
+            mode: this.multiple ? 'SIMPLE' : 'SINGLE',
+            allowDeselect: true
+        };
+        this.grid = Ext.create('Rally.ui.grid.Grid', Ext.Object.merge({
+            columnCfgs: this.columns,
+            enableEditing: false,
+            enableColumnHide: false,
+            enableColumnMove: false,
+            selModel: this.showRadioButtons || this.multiple ? Ext.create('Rally.ui.selection.CheckboxModel', Ext.apply(selectionConfig, {
+                enableKeyNav: false,
+                isRowSelectable: function (record) {
+                    return true;
+                }
+            })) : Ext.create('Ext.selection.RowModel', selectionConfig),
+            showRowActionsColumn: false,
+            //storeConfig: this._getStoreConfig(),
+            store: projectDataStore,
+            viewConfig: {
+                emptyText: Rally.ui.EmptyTextFactory.get('defaultText'),
+                publishLoadMessages: false,
+                getRowClass: function (record) {
+                    return Rally.util.Test.toBrowserTestCssClass('row', record.getId());
+                }
+            }
+        }, this.config.gridConfig));
+        this.mon(this.grid, {
+            beforeselect: this._onGridSelect,
+            beforedeselect: this._onGridDeselect,
+            load: this._onGridLoad,
+            scope: this
+        });
+        this.add(this.grid);
+        this._onGridReady();
+    },
+
+    _addTooltip: function() {
+        this._destroyTooltip();
+        this.tooltip = Ext.create('Rally.ui.tooltip.ToolTip', {
+            target: this.grid.getEl(),
+            html: 'You don\'t have permission to edit this item.',
+            delegate: '.disabled-row',
+            anchor: 'top',
+            showDelay: 0,
+            showOnClick: true
+        });
+    },
+
+    _destroyTooltip: function() {
+        if (this.tooltip) {
+            this.tooltip.destroy();
+        }
+    },
+
+    _getStoreConfig: function() {
+        var storeConfig = _.cloneDeep(this.getInitialConfig().storeConfig);
+
+        if (this._getSearchTerms()) {
+            storeConfig.search = this._getSearchTerms();
+        }
+
+        storeConfig.filters = (storeConfig.filters || []).concat(this.getStoreFilters());
+
+        return storeConfig;
+    },
+
+    _enableDoneButton: function() {
+        this.down('#doneButton').setDisabled(this.selectionCache.length ? false : true);
+    },
+
+    _findRecordInSelectionCache: function(record){
+        return _.findIndex(this.selectionCache, function(cachedRecord) {
+            return cachedRecord.get('ObjectID') === record.get('ObjectID');
+        });
+    },
+
+    _onGridSelect: function(selectionModel, record) {
+
+        var index = this._findRecordInSelectionCache(record);
+        if (index === -1) {
+            if (!this.multiple) {
+                this.selectionCache = [];
+            }
+            this.selectionCache.push(record);
+        }
+
+        this._enableDoneButton();
+    },
+
+    _onGridDeselect: function(selectionModel, record) {
+        var index = this._findRecordInSelectionCache(record);
+        if (index !== -1) {
+            this.selectionCache.splice(index, 1);
+        }
+
+        this._enableDoneButton();
+    },
+
+    _onGridReady: function() {
+        if (!this.grid.rendered) {
+            this.mon(this.grid, 'afterrender', this._onGridReady, this, {single: true});
+            return;
+        }
+
+        if (this.grid.getStore().isLoading()) {
+            this.mon(this.grid, 'load', this._onGridReady, this, {single: true});
+            return;
+        }
+
+        this._onGridLoad();
+        this.center();
+    },
+
+    _isArtifactEditable: function(record) {
+        return Rally.environment.getContext().getPermissions().isProjectEditor(record.get('Project'));
+    },
+
+    _onGridLoad: function() {
+        var defaultSelection = Ext.Array.from(this.selectedRef || this.selectedRecords);
+        if (defaultSelection.length) {
+            var selectedRecords = _.compact(_.map(defaultSelection, function(ref) {
+                var recordIndex = this.grid.getStore().find('_ref', ref);
+                return recordIndex >= 0 ? this.grid.getStore().getAt(recordIndex) : null;
+            }, this));
+            if(selectedRecords.length) {
+                this.grid.getSelectionModel().select(selectedRecords);
+            }
+        } else {
+            var store = this.grid.store;
+            var records = [];
+
+            _.each(this.selectionCache, function(record) {
+                var recordIndex = store.find('_ref', record.get('_ref'));
+
+                if (recordIndex !== -1) {
+                    var storeRecord = store.getAt(recordIndex);
+                    records.push(storeRecord);
+                }
+            });
+
+            if (records.length) {
+                this.grid.getSelectionModel().select(records);
+            }
+        }
+
+        this._addTooltip();
+        if (Rally.BrowserTest) {
+            Rally.BrowserTest.publishComponentReady(this);
+        }
+    },
+
+    _search: function() {
+        var terms = new RegExp(this._getSearchTerms(), "gi");
+        this.grid.getStore().filterBy(function(record){
+
+            if (!terms){
+                return true;
+            }
+
+            return terms.test(record.get('Name')) ||
+                terms.test(record.get('Path')) ||
+                terms.test(record.get('c_BuildingBlock'));
+        });
+    },
+
+    _getSearchTerms: function() {
+        var textBox = this.down('#searchTerms');
+        return textBox && textBox.getValue();
+    }
+});
+
+
+            Rally.launchApp('CustomApp', {
+                name:"PlanningApp",
+	            parentRepos:""
+            });
+
+        });
+    </script>
+
+
+    <style type="text/css">
+        .app {
+  /* Add app styles here */
+}
+th.summary {
+  text-transform: uppercase;
+  font-family: ProximaNovaSemiBold,Helvetica,Arial;
+  background-color: #e6e6e6;
+  font-size: 10pt;
+  width: 15%;
+}
+td.summary {
+  font-family: ProximaNova,Helvetica,Arial;
+  font-size: 10pt;
+  width: 15%;
+}
+table.summary {
+  cellpadding: 10px;
+  text-align: center;
+}
+
+    </style>
+</head>
+<body>
+</body>
+</html>
